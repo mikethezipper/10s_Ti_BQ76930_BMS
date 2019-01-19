@@ -1,19 +1,47 @@
-# 10s_Ti_BQ76930_BMS
-10s Battery Monitor System
+# bq769x0 Arduino Library
 
-Design is for a 6-10s Battery Monitoring system - monitor only. Current rev has no balancing ability - as it will be done on an external board. TI BQ76930 - controlled and communication thru a Wemos D1 Mini Lite - aka ESP8266 or ESP8285
+Arduino-compatible library for battery management system based on Texas Instruments bq769x0 IC (bq76920, bq76930 and bq76940).
 
-See current board design: 
-https://easyeda.com/mikethezipper/10s-ti-cell-monitor
-There are several known issues with the board as of 1-10-19 : need to route SDA and SCL i2c lines to D1 and D2
-Need to add line from boot pin to MCU (The MCU
+The library offerst most features for a simple BMS (including automatic fault handling and balancing). See also BMS48V hardware files.
 
 
-Cell qty is selected using jumpers
-Boot is done by pressing boot switch
+## Example Arduino sketch
 
-Code is based off of the LibreSolar arduino library:
-https://github.com/LibreSolar/bq769x0_ArduinoLibrary
+```C++
+#include <bq769x0.h>    // Library for Texas Instruments bq76920 battery management IC
 
-But upon first use it had issues. I will be keeping my code in this repository as it will be based off of the LibreSolar library, but with updates to function on the board and with the selected MCU.
+#define BMS_ALERT_PIN 2     // attached to interrupt INT0
+#define BMS_BOOT_PIN 7      // connected to TS1 input
+#define BMS_I2C_ADDRESS 0x18
 
+bq769x0 BMS(bq76920, BMS_I2C_ADDRESS);    // battery management system object
+
+void setup()
+{
+  int err = BMS.begin(BMS_ALERT_PIN, BMS_BOOT_PIN);
+
+  BMS.setTemperatureLimits(-20, 45, 0, 45);
+  BMS.setShuntResistorValue(5);
+  BMS.setShortCircuitProtection(14000, 200);  // delay in us
+  BMS.setOvercurrentChargeProtection(8000, 200);  // delay in ms
+  BMS.setOvercurrentDischargeProtection(8000, 320); // delay in ms
+  BMS.setCellUndervoltageProtection(2600, 2); // delay in s
+  BMS.setCellOvervoltageProtection(3650, 2);  // delay in s
+
+  BMS.setBalancingThresholds(0, 3300, 20);  // minIdleTime_min, minCellV_mV, maxVoltageDiff_mV
+  BMS.setIdleCurrentThreshold(100);
+  BMS.enableAutoBalancing();
+  BMS.enableDischarging();
+}
+
+void loop()
+{
+  BMS.update();  // should be called at least every 250 ms
+  BMS.printRegisters();
+}
+```
+
+## To Do list
+
+- Proper SOC estimation and coloumb counter implementation
+- Testing for ICs with more than 5 cells
