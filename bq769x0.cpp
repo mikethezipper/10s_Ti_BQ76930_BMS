@@ -138,14 +138,14 @@ int bq769x0::begin(byte alertPin, byte bootPin)
     {
 		//debug prints to show that initial comms were successful
 		Serial.println("Address and CRC detection successful");
-		Serial.println("Address:  ");
-		Serial.print(I2CAddress);
-		Serial.println("CRC Enabled:  ");
-		Serial.print(crcEnabled);
+		Serial.print("Address:  ");
+		Serial.println(I2CAddress, HEX);
+		Serial.print("CRC Enabled:  ");
+		Serial.println(crcEnabled);
 		
 
         // initial settings for bq769x0
-        writeRegister(SYS_CTRL1, 0b00011000);  // switch external thermistor and ADC on
+        writeRegister(SYS_CTRL1, 0b00010000);  // Turn ADC on and use internal die temp
         writeRegister(SYS_CTRL2, 0b01000000);  // switch CC_EN on
 
 		    // attach ALERT interrupt to this instance
@@ -764,34 +764,112 @@ void bq769x0::updateCurrent(bool ignoreCCReadyFlag)
 
 void bq769x0::updateVoltages()
 {
-  long adcVal = 0;
-  
-  // read battery pack voltage
-  adcVal = (readRegister(BAT_HI_BYTE) << 8) | readRegister(BAT_LO_BYTE);
-  batVoltage = 4.0 * adcGain * adcVal / 1000.0 + 4 * adcOffset;
-  
-  // read cell voltages
-  Wire.beginTransmission(I2CAddress);
-  Wire.write(VC1_HI_BYTE);
-  Wire.endTransmission();
-  
-  if (Wire.requestFrom(I2CAddress, 2 * numberOfCells) == 2 * numberOfCells)
-  {
-    idCellMaxVoltage = 0;
-    idCellMinVoltage = 0;
-    for (int i = 0; i < numberOfCells; i++)
-    {
-      adcVal = ((Wire.read() & B00111111) << 8) | Wire.read();
-      cellVoltages[i] = adcVal * adcGain / 1000 + adcOffset;
 
-      if (cellVoltages[i] > cellVoltages[idCellMaxVoltage]) {
-        idCellMaxVoltage = i;
-      }
-      if (cellVoltages[i] < cellVoltages[idCellMinVoltage] && cellVoltages[i] > 500) {
-        idCellMinVoltage = i;
-      }
+    // read cell voltages
+	
+	long adcVal = 0;
+    char buf[4];
+    int connectedCellsTemp = 0;
+    idCellMaxVoltage = 0; //resets to zero before writing values to these vars
+    idCellMinVoltage = 0;
+	byte connectedCells = 0;
+
+    uint8_t crc;
+	crc = 0;
+    buf[0] = (char) VC1_HI_BYTE; // start with the first cell
+	
+	/***** begin reading of block by initiating read session ***********/
+	// _i2c.write(I2CAddress << 1, buf, 1);;  //  ARM Mbed version - writes to i2c (i2c address, register address, bytes)\
+	
+    Wire.beginTransmission(I2CAddress); //arduino version
+	Wire.write(buf[0]); //Tells slave that this is the device and the address it is interested in
+	Wire.endTransmission(); // end transmission so that read can begin
+
+
+	
+// Note that each cell voltage is 14 bits stored across two 8 bit register locations in the BQ chip
+// This means that first we need to read register HI (in first instance this is VC1_HI_BYTE) - however this 8 bit piece of data has two worthless first digits - garbage
+// So to remove the first to bits, the bitwise & is used. By saying A & 00111111, only the last 6 bits are used. 
+// all of the 8 bits on the low side are used. So the overall reading is the last 6 bits of high in front of the 8 bits from low.
+// To add the hi and lo readings together, the << is used to shift the hi value over by 8 bits, then adding it to the 8 bits 
+// This is done by using the OR operator |. So the total thing looks like: adcVal = (VC_HI_BYTE & 0b00111111) << 8 | VC_LO_BYTE;
+
+    for (int i = 0; i < numberOfCells; i++) // will run once for each cell up to the total num of cells
+    {
+        if (crcEnabled == true) {
+            /** Mbed version - request 4 bytes and write to buf *******/
+			// first request data from BQ chip - 4 bytes total, two for hi and lo, and two for CRC for each byte
+			//Note that the return is: buf[0]: hi byte, buf[1] : CRC for 1st byte, buf[2] : Lo Byte, buf[3] CRC for lo byte
+			//     _i2c.read(I2CAddress << 1, buf, 4); // will request data from buffer from : (i2c address, data storage location,# of bytes)
+		
+            //   adcVal = (buf[0] & 0b00111111) << 8 | buf[2]; // From datasheet V(cell) = GAIN x ADC(cell) + OFFSET 
+			
+			/******************* Arduino Version ******************/
+			
+			
+			  Wire.requestFrom(I2CAddress, 4); // requests 4 bytes: 1)hi Byte 2)Hi byte CRC 3) Lo Byte 4) Lo byte crc
+			  // bytes are written to register, so now they need to be called one at a time and processed 
+			buf[0] = Wire.read(); // hi data - note that only bottom 6 bits are good
+			buf[1] = Wire.read(); // hi data CRC - done on address and data
+			buf[2] = Wire.read(); // lo data byte - all 8 bits are used
+			buf[3] = Wire.read(); // lo data CRC - done on just the data byte
+			
+			// 1st check if CRC matches data bytes
+			// CRC of first bytes includes slave address (including R/W bit) and data
+            crc = _crc8_ccitt_update(0, (I2CAddress << 1) | 1);
+            crc = _crc8_ccitt_update(crc, buf[0]);
+            if (crc != buf[1]){
+				Serial.println("CRC check fail at 1st byte read - crc of 1st bytes and data doesn't match");
+				return; //don't save corrupt value and exit
+			}
+				
+			// CRC of subsequent bytes contain only data
+            crc = _crc8_ccitt_update(0, buf[2]);
+            if (crc != buf[3]) {
+				Serial.println("CRC check failed upon read - crc of 2nd byte and data doesn't match");
+				return; // don't save corrupted value
+				}
+	
+
+        }
+        else { // If CRC is disabled only read 2 bytes and call it a day :)
+		
+		/*****************   ARM Mbed version *******************
+            _i2c.read(I2CAddress << 1, buf, 2);
+            adcVal = (buf[0] & 0b00111111) << 8 | buf[1];
+			
+			******************************************************/
+		/************* Arduino versino **************************/
+		
+		
+		Wire.requestFrom(I2CAddress, 2); // requests 4 bytes: 1)hi Byte 2)Hi byte CRC 3) Lo Byte 4) Lo byte crc
+			  // bytes are written to register, so now they need to be called one at a time and processed 
+			buf[0] = Wire.read(); // hi data - note that only bottom 6 bits are good
+			buf[2] = Wire.read(); // lo data byte - all 8 bits are used
+		
+        }
+
+		/************* Get Cell Voltages now ***********/
+		adcVal = (buf[0] & 0b00111111) << 8 | buf[2];  // reads 1st byte from register and drop the first two bits, shift left then use lo data
+		cellVoltages[i] = adcVal * adcGain / 1000 + adcOffset; // calculates real voltage in mV
+		
+		/********** Filter out fake voltage readings from non-connected cells ****************/
+        if (cellVoltages[i] > 500) {  
+            connectedCellsTemp++; //adds one to the temporary cell counter var - only readings above 500mV are counted towards real cell count
+        }
+
+        if (cellVoltages[i] > cellVoltages[idCellMaxVoltage]) { // if the current cell voltage is higher than the last cells, bump this up
+            idCellMaxVoltage = i;
+        }
+        if (cellVoltages[i] < cellVoltages[idCellMinVoltage] && cellVoltages[i] > 500) {
+            idCellMinVoltage = i;
+        }
     }
-  }
+    connectedCells = connectedCellsTemp;
+    
+    // read battery pack voltage
+    adcVal = (readRegister(BAT_HI_BYTE) << 8) | readRegister(BAT_LO_BYTE);
+    batVoltage = 4.0 * adcGain * adcVal / 1000.0 + connectedCells * adcOffset;
 }
 
 
@@ -918,6 +996,9 @@ void bq769x0::printRegisters()
 
   Serial.print(F("0x01 CELLBAL1:  "));
   Serial.println(byte2char(readRegister(CELLBAL1)));
+  
+  Serial.print(F("0x02 CELLBAL2:  "));
+  Serial.println(byte2char(readRegister(CELLBAL2)));
 
   Serial.print(F("0x04 SYS_CTRL1: "));
   Serial.println(byte2char(readRegister(SYS_CTRL1)));
