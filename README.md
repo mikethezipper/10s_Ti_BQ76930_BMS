@@ -1,5 +1,7 @@
 # bq769x0 Arduino Library
 
+Note - Testing only done on BQ7693003 WITH CRC - holy damn, check if your chip requires CRC, it makes everything a pain in the ass
+
 Arduino-compatible library for battery management system based on Texas Instruments bq769x0 IC (bq76920, bq76930 and bq76940).
 
 The library offerst most features for a simple BMS (including automatic fault handling and balancing). See also BMS48V hardware files.
